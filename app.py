@@ -5,149 +5,143 @@ import zipfile
 import io
 
 # --- SAYFA AYARLARI ---
-st.set_page_config(page_title="Evrensel Sınav Okuma Sistemi", layout="wide")
+st.set_page_config(page_title="Sınav Okuma Sistemi", layout="centered")
 
-st.title("📄 Evrensel Optik/Sınav Okuma Sistemi")
-st.markdown("""
-Bu sistem, farklı soru sayılarına ve kitapçık türlerine göre sınav kağıtlarını analiz eder.
-**Ayarları sol menüden yapınız.**
-""")
+# --- BAŞLIK ---
+st.title("📄 Otomatik Sınav Okuma Sistemi")
+st.info("Sistem, 'Cevap Anahtarı' satırlarını ve öğrencileri PDF içerisinden otomatik tespit eder.")
 
-# --- YAN MENÜ (AYARLAR) ---
-st.sidebar.header("⚙️ Sınav Ayarları")
+# --- YENİ İMZA METNİ ---
+imza_metni = "Öğr.Gör. Berkay AKSU tarafından kişisel kullanım amaçlı oluşturulmuştur. Hatalı sonuç verebilir lütfen kontrol edin. Oluşan sonuçlar ve kontrolü tamamen kullanan kişinin sorumluluğundadır."
 
-# 1. Soru Sayısı Ayarı
-soru_sayisi = st.sidebar.number_input("Sınavda Kaç Soru Var?", min_value=5, max_value=100, value=25, step=1)
-
-# 2. Kitapçık Türü Ayarı
-kitapcik_modu = st.sidebar.selectbox(
-    "Kitapçık Düzeni",
-    ("A-B (2 Kitapçık)", "Tek Kitapçık", "A-B-C (3 Kitapçık)", "A-B-C-D (4 Kitapçık)")
-)
-
-# 3. Cevap Anahtarlarını Dinamik Oluştur
-keys = {}
-
-st.sidebar.subheader("🔑 Cevap Anahtarlarını Giriniz")
-
-if kitapcik_modu == "Tek Kitapçık":
-    anahtar = st.sidebar.text_input("Cevap Anahtarı", help="Örn: ABCDE...")
-    keys["A"] = anahtar.strip() # Tek kitapçıkta varsayılan 'A' kabul ederiz
-
-elif kitapcik_modu == "A-B (2 Kitapçık)":
-    keys["A"] = st.sidebar.text_input("A Kitapçığı", "CDBCBCBDCBBCCABEBBCABBCBC").strip()
-    keys["B"] = st.sidebar.text_input("B Kitapçığı", "BBCBBDBABCBCCCCCAEBCDBBBC").strip()
-
-elif kitapcik_modu == "A-B-C (3 Kitapçık)":
-    keys["A"] = st.sidebar.text_input("A Kitapçığı").strip()
-    keys["B"] = st.sidebar.text_input("B Kitapçığı").strip()
-    keys["C"] = st.sidebar.text_input("C Kitapçığı").strip()
-
-elif kitapcik_modu == "A-B-C-D (4 Kitapçık)":
-    keys["A"] = st.sidebar.text_input("A Kitapçığı").strip()
-    keys["B"] = st.sidebar.text_input("B Kitapçığı").strip()
-    keys["C"] = st.sidebar.text_input("C Kitapçığı").strip()
-    keys["D"] = st.sidebar.text_input("D Kitapçığı").strip()
+# Sol Menüye İmza
+st.sidebar.markdown("---")
+st.sidebar.warning(imza_metni)
 
 # --- FONKSİYONLAR ---
 
-def puan_hesapla(cevap_string, kitapcik, soru_adedi, anahtarlar):
-    """Öğrenci cevabını anahtarla karşılaştırıp puan listesi döner."""
+def cevap_anahtarlarini_bul(uploaded_file):
+    """
+    PDF'in ilk sayfalarında 'CevapAnahtarı' kelimesini arar ve
+    otomatik olarak A ve B anahtarlarını çeker.
+    """
+    bulunan_anahtarlar = {}
+    
+    with pdfplumber.open(uploaded_file) as pdf:
+        # Genelde cevap anahtarı ilk sayfada olur, garanti olsun diye ilk 2 sayfaya bakalım
+        for i in range(min(2, len(pdf.pages))):
+            page = pdf.pages[i]
+            tables = page.extract_tables()
+            
+            for table in tables:
+                for row in table:
+                    for cell in row:
+                        if cell:
+                            # Temizlik: Boşlukları sil, büyük harf yap
+                            text_raw = str(cell).replace("\n", " ").strip()
+                            text_clean = text_raw.replace(" ", "").upper()
+                            
+                            # "CEVAPANAHTARI" kelimesini içeriyor mu?
+                            if "CEVAPANAHTARI" in text_clean:
+                                # Metni parçala: "CevapAnahtarı CDBC... A" formatını ayıkla
+                                # 'CevapAnahtarı' kelimesinden sonrasını al
+                                try:
+                                    # Anahtarın kendisini bulmaya çalış (en uzun harf dizisi)
+                                    parts = text_raw.split()
+                                    candidate_key = ""
+                                    booklet_type = ""
+                                    
+                                    for part in parts:
+                                        # Uzun harf dizisi anahtardır
+                                        if len(part) > 15 and part.upper() != "CEVAPANAHTARI":
+                                            candidate_key = part.strip()
+                                        # Tek harf (A/B) kitapçık türüdür
+                                        if part.strip() in ["A", "B"]:
+                                            booklet_type = part.strip()
+                                    
+                                    # Eğer satırda A/B yazmıyorsa, sırayla atama yapabiliriz ama 
+                                    # senin formatında satır sonunda A veya B yazıyor.
+                                    if candidate_key and booklet_type:
+                                        bulunan_anahtarlar[booklet_type] = candidate_key.upper()
+                                        
+                                except:
+                                    continue
+                                    
+    return bulunan_anahtarlar
+
+def puan_hesapla(cevap_string, kitapcik, keys):
+    """
+    Her soru 4 puan, 25 soru.
+    """
     cevap = str(cevap_string).replace(" ", "").upper()
     
-    # Kitapçık türü belirleme (Tek kitapçıksa her zaman A'yı kullan)
-    if kitapcik_modu == "Tek Kitapçık":
-        aktif_kitapcik = "A"
-    else:
-        aktif_kitapcik = kitapcik if kitapcik in anahtarlar else None
+    # Kitapçık anahtarı yoksa 0 ver
+    if kitapcik not in keys:
+        return [0] * 25
 
-    if not aktif_kitapcik or aktif_kitapcik not in anahtarlar:
-        return [0] * soru_adedi # Kitapçık bulunamazsa 0 puan
-
-    dogru_cevaplar = anahtarlar[aktif_kitapcik]
+    dogru_cevaplar = keys[kitapcik]
     
-    # Eksik karakter varsa X ile doldur, fazlaysa kes
-    if len(cevap) < soru_adedi:
-        cevap = cevap + "X" * (soru_adedi - len(cevap))
-    cevap = cevap[:soru_adedi]
-    
-    # Soru başına puan (Otomatik Hesaplama)
-    birim_puan = 100 / soru_adedi
+    # Uzunluk sabitleme (25 Soru)
+    if len(cevap) < 25:
+        cevap = cevap + "X" * (25 - len(cevap))
+    cevap = cevap[:25]
     
     puanlar = []
-    for i in range(soru_adedi):
-        # Anahtar o soru için tanımlıysa ve cevap doğruysa
+    for i in range(25):
+        # Anahtar uzunluğunu aşmamaya dikkat et
         if i < len(dogru_cevaplar) and cevap[i] == dogru_cevaplar[i]:
-            puanlar.append(birim_puan) # Tam puan (float olabilir)
+            puanlar.append(4)
         else:
             puanlar.append(0)
     return puanlar
 
-def tablo_olustur_dinamik(ogrenci_adi, puanlar, soru_adedi):
-    """Soru sayısına göre satırları otomatik bölen akıllı tablo oluşturucu."""
+def tablo_olustur(ogrenci_adi, puanlar):
     toplam_puan = sum(puanlar)
     
-    # Tabloyu parçalara bölmek için ayarlar
-    sutun_limiti = 20 # Her satırda kaç soru gösterilsin? (Görsel genişlik için 20-25 ideal)
-    
-    # Kaç parça (chunk) olacak? (Örn: 45 soru varsa -> 20 + 20 + 5 = 3 parça)
-    parca_sayisi = (soru_adedi + sutun_limiti - 1) // sutun_limiti
-    
-    # Resim yüksekliğini parça sayısına göre ayarla (Her parça 2 satır kaplar)
-    fig_height = 1.5 + (parca_sayisi * 1.5) 
-    fig, ax = plt.subplots(figsize=(12, fig_height))
+    fig, ax = plt.subplots(figsize=(12, 2.8))
     ax.axis('tight')
     ax.axis('off')
 
-    table_data = []
+    # Veri Hazırlama
+    row1 = [str(i) for i in range(1, 21)]
+    row2 = [str(p) for p in puanlar[:20]]
+    row3 = [str(i) for i in range(21, 26)] + [""] * 15
+    row4 = [str(p) for p in puanlar[20:]] + [""] * 15
     
-    for i in range(parca_sayisi):
-        start = i * sutun_limiti
-        end = min((i + 1) * sutun_limiti, soru_adedi)
-        
-        # Soru Numaraları Satırı
-        row_nums = [str(k) for k in range(start + 1, end + 1)]
-        # Puanlar Satırı (Ondalıklı sayıları düzgün formatla: 4.0 -> 4, 2.5 -> 2.5)
-        row_scores = [f"{p:.2f}".rstrip('0').rstrip('.') for p in puanlar[start:end]]
-        
-        # Eğer satır kısa kaldıysa (son satır gibi), boşlukla doldur
-        eksik = sutun_limiti - len(row_nums)
-        if eksik > 0:
-            row_nums += [""] * eksik
-            row_scores += [""] * eksik
-        
-        table_data.append(row_nums)
-        table_data.append(row_scores)
+    index_yerlesim = 8 
+    row3[index_yerlesim] = "TOPLAM PUAN"
+    row4[index_yerlesim] = str(toplam_puan)
 
-    # Toplam Puanı En Sona Ekle
-    # Son satırın ortasına veya sonuna ekleyelim
-    son_satir_index = len(table_data) - 1
+    table_data = [row1, row2, row3, row4]
     
-    # Tabloyu Çiz
     table = ax.table(cellText=table_data, loc='center', cellLoc='center')
     table.auto_set_font_size(False)
-    table.set_fontsize(9)
-    table.scale(1, 1.8) # Hücre yüksekliği
+    table.set_fontsize(10)
+    table.scale(1, 1.6)
 
-    # --- Renklendirme ve Stil ---
+    # Renklendirme
     for (row, col), cell in table.get_celld().items():
-        # Çift numaralı satırlar (0, 2, 4...) -> Soru Numaraları (Kalın)
-        if row % 2 == 0:
+        if row == 0 or row == 2:
             cell.set_text_props(weight='bold')
-            # Boş hücrelerin çerçevesini gizle
-            if cell.get_text().get_text() == "":
-                 cell.set_edgecolor('white')
+            if col >= 5 and row == 2 and col != index_yerlesim:
+                 cell.set_edgecolor('white') 
 
-        # Tek numaralı satırlar (1, 3, 5...) -> Puanlar (Kırmızı)
-        if row % 2 == 1:
+        if row == 1 or row == 3:
             cell.set_text_props(color='red', weight='bold')
-             # Boş hücrelerin çerçevesini gizle
-            if cell.get_text().get_text() == "":
-                 cell.set_edgecolor('white')
+            if col >= 5 and row == 3:
+                 if col != index_yerlesim: 
+                     cell.set_edgecolor('white')
+                     cell.get_text().set_text("")
+        
+        if col == index_yerlesim:
+            if row == 2:
+                cell.set_text_props(color='black', weight='bold')
+                cell.set_edgecolor('black') 
+            if row == 3:
+                cell.set_text_props(color='blue', weight='bold', size=14)
+                cell.set_edgecolor('black')
 
-    # Toplam Puanı Başlık Olarak veya Resmin Altına Yazalım (Tablo içine sıkıştırmak yerine daha temiz)
-    plt.title(f"{ogrenci_adi}\nTOPLAM PUAN: {toplam_puan:.2f}".rstrip('0').rstrip('.'), 
-              fontsize=14, color='blue', weight='bold', y=0.98 if parca_sayisi>1 else 1.1)
+    plt.title(f"{ogrenci_adi} - Sınav Sonuç Tablosu", y=1.05)
     
     buf = io.BytesIO()
     plt.savefig(buf, format='png', bbox_inches='tight', dpi=150)
@@ -155,8 +149,10 @@ def tablo_olustur_dinamik(ogrenci_adi, puanlar, soru_adedi):
     buf.seek(0)
     return buf
 
-def pdf_den_veri_oku(uploaded_file):
-    """PDF'ten veri okuma (Hata toleransı artırılmış)."""
+def pdf_den_veri_oku_standart(uploaded_file):
+    """
+    KONT 1 formatına göre öğrenci verilerini okur.
+    """
     data = []
     with pdfplumber.open(uploaded_file) as pdf:
         for page in pdf.pages:
@@ -165,85 +161,106 @@ def pdf_den_veri_oku(uploaded_file):
                 for row in table:
                     cleaned_row = [str(item) for item in row if item is not None]
                     
-                    # Basit bir filtre: İçinde en azından uzun bir cevap anahtarı benzeri string var mı?
-                    # Ve isim sütunu var mı?
-                    if len(cleaned_row) >= 3:
-                        try:
-                            # Genelde yapı: [Sıra, No, Ad, CevapStringi...]
-                            # Cevap stringini bulmaya çalışalım (en uzun string genelde cevaptır)
-                            cevap_adaylari = [s for s in cleaned_row if len(str(s)) > 10]
-                            if not cevap_adaylari:
-                                continue
-                            
-                            cevap_raw = cevap_adaylari[-1] # Genelde sondadır
-                            
-                            # İsim bulma (Cevap olmayan, sayı olmayan en uzun string)
-                            isim_adaylari = [s for s in cleaned_row if s != cevap_raw and not any(char.isdigit() for char in str(s))]
-                            ad_soyad = "Bilinmeyen İsim"
-                            if isim_adaylari:
-                                ad_soyad = max(isim_adaylari, key=len).replace('\n', ' ')
+                    if len(cleaned_row) < 3: continue
+                    
+                    try:
+                        # Cevap Stringi Bulma (Sayı olmayan, uzun metin)
+                        cevap_adaylari = [
+                            s for s in cleaned_row 
+                            if len(str(s)) > 15 
+                            and not str(s).replace(" ","").isdigit()
+                            and "CevapAnahtarı" not in str(s) # Cevap anahtarı satırını öğrenci sanmasın
+                        ]
+                        
+                        if not cevap_adaylari: continue
+                        cevap_raw = cevap_adaylari[-1]
+                        
+                        # Kitapçık Türü Bulma
+                        kitapcik = "A" 
+                        clean_raw = cevap_raw.replace('\n', ' ').strip()
+                        if clean_raw.endswith(" A") or clean_raw.endswith("A"): kitapcik = "A"
+                        elif clean_raw.endswith(" B") or clean_raw.endswith("B"): kitapcik = "B"
+                        
+                        # İsim Bulma
+                        isim_adaylari = [
+                            s for s in cleaned_row 
+                            if s != cevap_raw 
+                            and len(str(s)) > 3
+                            and not any(char.isdigit() for char in str(s))
+                            and "CevapAnahtarı" not in str(s)
+                        ]
+                        
+                        ad_soyad = "Öğrenci"
+                        if isim_adaylari:
+                            ad_soyad = max(isim_adaylari, key=len).replace('\n', ' ')
 
-                            # Kitapçık Bulma
-                            kitapcik = "A" # Varsayılan
-                            if "A" in cevap_raw[-3:]: kitapcik = "A"
-                            elif "B" in cevap_raw[-3:]: kitapcik = "B"
-                            elif "C" in cevap_raw[-3:]: kitapcik = "C"
-                            elif "D" in cevap_raw[-3:]: kitapcik = "D"
-                            
-                            # Cevap temizliği
-                            cevap_string = cevap_raw.replace('\n', '').replace(' ', '')
-                            # Sondaki A/B/C/D harfini temizle (Eğer cevap anahtarının parçası değilse)
-                            if cevap_string.endswith(('A','B','C','D')) and len(cevap_string) > soru_sayisi:
-                                cevap_string = cevap_string[:-1]
+                        # Cevap Temizliği
+                        cevap_sadece_harf = ''.join(filter(str.isalpha, cevap_raw.upper()))
+                        if len(cevap_sadece_harf) > 25:
+                            if cevap_sadece_harf.endswith(kitapcik):
+                                cevap_sadece_harf = cevap_sadece_harf[:-1]
+                        
+                        # Veriyi Ekle
+                        if len(cevap_sadece_harf) >= 10:
+                             data.append([ad_soyad, kitapcik, cevap_sadece_harf])
 
-                            data.append([ad_soyad, kitapcik, cevap_string])
-                        except:
-                            continue
+                    except:
+                        continue
     return data
 
 # --- ARAYÜZ AKIŞI ---
+
 uploaded_file = st.file_uploader("Sınav Sonuç PDF Dosyasını Yükleyin", type="pdf")
 
 if uploaded_file is not None:
-    # Anahtar kontrolü
-    eksik_anahtar = False
-    if kitapcik_modu == "A-B (2 Kitapçık)" and (not keys.get("A") or not keys.get("B")): eksik_anahtar = True
+    st.write("🔍 Dosya taraniyor...")
     
-    if eksik_anahtar:
-        st.warning("Lütfen sol menüden cevap anahtarlarını eksiksiz giriniz.")
+    # 1. Önce Cevap Anahtarlarını Otomatik Bul
+    bulunan_keys = cevap_anahtarlarini_bul(uploaded_file)
+    
+    if not bulunan_keys:
+        st.error("⚠️ PDF içinde 'CevapAnahtarı' satırı bulunamadı! Lütfen dosya formatını kontrol edin.")
     else:
-        st.info("Dosya analiz ediliyor...")
-        try:
-            ogrenciler = pdf_den_veri_oku(uploaded_file)
+        # Bulunan anahtarları ekrana yaz (Kullanıcı görsün)
+        st.success("✅ Cevap Anahtarları Otomatik Algılandı:")
+        cols = st.columns(len(bulunan_keys))
+        for idx, (k, v) in enumerate(bulunan_keys.items()):
+            cols[idx].info(f"**Kitapçık {k}:** {v}")
+        
+        # 2. Öğrencileri Oku
+        ogrenciler = pdf_den_veri_oku_standart(uploaded_file)
+        
+        if len(ogrenciler) > 0:
+            st.write(f"📊 **{len(ogrenciler)}** öğrenci tespit edildi.")
             
-            if len(ogrenciler) > 0:
-                st.success(f"{len(ogrenciler)} öğrenci bulundu. İşlem başlatılıyor...")
+            # İşlem Butonu
+            if st.button("Sonuçları Oluştur ve İndir"):
+                progress_bar = st.progress(0)
+                zip_buffer = io.BytesIO()
                 
-                if st.button("Sonuçları Oluştur"):
-                    progress_bar = st.progress(0)
-                    zip_buffer = io.BytesIO()
-                    
-                    with zipfile.ZipFile(zip_buffer, "w") as zf:
-                        for i, (ad, ktp, cvp) in enumerate(ogrenciler):
-                            # Hesapla
-                            puanlar = puan_hesapla(cvp, ktp, soru_sayisi, keys)
-                            # Çiz
-                            img_buf = tablo_olustur_dinamik(ad, puanlar, soru_sayisi)
-                            # Kaydet
-                            dosya_adi = f"{ad.replace(' ', '_')}.png"
-                            zf.writestr(dosya_adi, img_buf.getvalue())
-                            
-                            progress_bar.progress((i + 1) / len(ogrenciler))
-                    
-                    zip_buffer.seek(0)
-                    st.balloons()
-                    st.download_button(
-                        label="📥 ZIP Olarak İndir",
-                        data=zip_buffer,
-                        file_name="Sinav_Sonuclari.zip",
-                        mime="application/zip"
-                    )
-            else:
-                st.error("PDF'ten veri okunamadı. Formatı kontrol edin.")
-        except Exception as e:
-            st.error(f"Hata: {e}")
+                with zipfile.ZipFile(zip_buffer, "w") as zf:
+                    for i, (ad, ktp, cvp) in enumerate(ogrenciler):
+                        # Hesapla (Bulunan otomatik anahtarları kullan)
+                        puanlar = puan_hesapla(cvp, ktp, bulunan_keys)
+                        # Çiz
+                        img_buf = tablo_olustur(ad, puanlar)
+                        # Kaydet
+                        dosya_adi = f"{ad.replace(' ', '_')}.png"
+                        zf.writestr(dosya_adi, img_buf.getvalue())
+                        
+                        progress_bar.progress((i + 1) / len(ogrenciler))
+                
+                zip_buffer.seek(0)
+                st.balloons()
+                st.download_button(
+                    label="📥 Sonuçları ZIP İndir",
+                    data=zip_buffer,
+                    file_name="Sinav_Sonuclari.zip",
+                    mime="application/zip"
+                )
+        else:
+            st.warning("Cevap anahtarı bulundu ancak öğrenci verisi okunamadı.")
+
+# --- ALT İMZA (Sayfa Sonu) ---
+st.markdown("---")
+st.markdown(f"<div style='text-align: center; color: #666; font-size: 0.8em;'>{imza_metni}</div>", unsafe_allow_html=True)
